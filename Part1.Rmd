@@ -1,0 +1,345 @@
+---
+title: "Data Challenge 1"
+author: "Zhengfang Xu"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Task 0 Prepare setting
+
+clean the environment and fundamental setting
+
+```{r warning=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Session > Restart R
+options(scipen = 6) 
+options(digits = 4)
+options(digits.secs = 6)
+options(warning = FALSE) 
+options(width = 60)
+```
+
+install and library packages
+
+```{r warning=FALSE, include=FALSE}
+check_pkg <- function(x)
+  {
+    if (!require(x,character.only = TRUE, quietly = TRUE))
+    {
+      install.packages(x,dep=TRUE)
+        if(!require(x,character.only = TRUE, quietly = TRUE)) stop("Package not found")
+    }
+}
+check_pkg("sf")
+check_pkg("httr")
+
+check_pkg("leaflet")
+check_pkg("cluster")
+check_pkg("fpc")
+check_pkg("seriation")
+check_pkg("mlbench")
+check_pkg("dbscan")
+check_pkg("ggplot2")
+check_pkg("plyr")
+```
+
+set path
+
+```{r warning=FALSE, include=FALSE}
+datafolder <- here::here("data")
+Rfold <- here::here()
+figurefolder <- here::here("figs")
+```
+
+# task 1 read the data
+
+```{r}
+# coordinate system is CH1903+/LV95
+dbgpkg95 <- read_sf(file.path(datafolder,"RoadTrafficAccidentLocations.gpkg"))
+dfcsv <- read.csv(file.path(datafolder,"RoadTrafficAccidentLocations.csv"))
+```
+
+# task 2 Report the following numbers
+
+```{r warning=FALSE}
+# Number of accidents by accident severity category
+a <- data.frame(table(dbgpkg95$AccidentSeverityCategory_en)) 
+names(a) <- c("severity category","numbers")
+knitr::kable(a)
+
+#Number of accidents by accident type
+b <- data.frame(table(dbgpkg95$AccidentType_en))
+names(b) <- c("accident type", "numbers")
+knitr::kable(b)
+
+#Number of accidents involving pedestrians, bicycles, and motorcycles, respectively. 
+#And combina-tions thereof (pedestrian AND bicycle, pedestrian AND motorcycle etc.). 
+#Are there any accidentsinvolving all three modes (pedestrian, bicycle, motorcycle)
+
+# create a "title" vector
+acciinvo <- c("pedestrians", "bicycles", "motorcycles", "pedestrians AND bicycles", 
+              "pedestrians AND motorcycles", "bicycles AND motorcycles", 
+              "pedestrians AND bicycles AND motorcycles") 
+
+# compute the number respectively
+
+acciinvonb <- c(sum(dbgpkg95$AccidentInvolvingPedestrian == TRUE), 
+                
+sum(dbgpkg95$AccidentInvolvingBicycle == TRUE), 
+
+sum(dbgpkg95$AccidentInvolvingMotorcycle == TRUE), 
+
+sum(dbgpkg95$AccidentInvolvingPedestrian == TRUE & dbgpkg95$AccidentInvolvingBicycle
+    == TRUE ), 
+
+sum(dbgpkg95$AccidentInvolvingPedestrian == TRUE & dbgpkg95$AccidentInvolvingMotorcycle
+    == TRUE),
+    
+sum(dbgpkg95$AccidentInvolvingBicycle == TRUE & dbgpkg95$AccidentInvolvingMotorcycle 
+    == TRUE),
+
+sum(dbgpkg95$AccidentInvolvingBicycle == TRUE & dbgpkg95$AccidentInvolvingMotorcycle == TRUE 
+    & dbgpkg95 $AccidentInvolvingPedestrian == TRUE))
+
+# presentation in a table
+c = data.frame(acciinvo, acciinvonb)
+names(c) = c("accidents involving", "numbers")
+knitr::kable(c)
+```
+
+# task 3 generate a graph
+
+```{r}
+#prepare the data
+yearchange <- data.frame(table(dbgpkg95$AccidentYear))
+
+#generate the graph
+graphyc <- ggplot(yearchange, aes(x= Var1, y = Freq, group = 1)) + 
+  geom_point() + 
+  geom_label(aes(label = Freq)) +  
+  geom_line() + 
+  labs (x = "year", y = "number of accidents", 
+        title = "Temporal evolution of the number of accidents from 2011 to 2021" ) + 
+  theme(axis.text = element_text(color = "dodgerblue", size = 10), 
+        plot.title = element_text(hjust = 1, size = 16, face = "bold.italic")) 
+plot(graphyc)
+```
+
+# task 4 produce a map showing severity
+
+### leaflet
+
+```{r}
+# transfer the coordinate
+db84 <- st_transform(dbgpkg95,crs = 4326)
+# retrive data involving bicycles
+databcl84 <- subset(db84, db84$AccidentInvolvingBicycle == TRUE)
+# add the palette
+pal <- colorFactor('RdYlBu', db84$AccidentSeverityCategory_en)
+
+# create the map colored by severity
+n <- leaflet(db84) %>% 
+  addTiles() %>% 
+  addCircleMarkers( color = ~pal(AccidentSeverityCategory_en), 
+                    stroke = FALSE, fillOpacity = 0.8, 
+  radius = 4, popup = db84$AccidentSeverityCategory_en) %>% 
+  addLegend(position = "bottomright",values = ~AccidentSeverityCategory_en, 
+            pal = pal, labels = ~levels(AccidentSeverityCategory_en),opacity = 1)
+
+n
+```
+
+### ggplot
+
+```{r warning=FALSE}
+# input data of zurich boundary
+zurichbd <- read_sf(file.path(datafolder, "Zurich_boundary.shp"))
+
+# retrive data involving bicycles
+databcl95 <- subset(dbgpkg95, dbgpkg95$AccidentInvolvingBicycle == TRUE)
+
+# use 
+m <- ggplot() +
+  geom_sf(data = zurichbd, fill = "lightgrey", color = "black", size = 0.1) +
+  geom_sf(data = databcl95, alpha = 0.3, aes(color = databcl95$AccidentSeverityCategory_en), 
+          show.legend = "point") +
+  theme_void() +
+  ggtitle("Bicycle accident data colored by accident severity category") +
+  scale_color_discrete(name = "SeverityCategory")
+m
+```
+
+# task 5 definition of attributes
+
+Describe clusters: regard accidents that happened within 200m as elevated accident occurrence
+
+```{r}
+
+# prepare the data of coordinate
+bic2018 <- subset(dbgpkg95, dbgpkg95$AccidentYear == 
+                    2018 & dbgpkg95$AccidentInvolvingBicycle == TRUE)
+bic2019 <- subset(dbgpkg95, dbgpkg95$AccidentYear == 
+                    2019 & dbgpkg95$AccidentInvolvingBicycle == TRUE)
+bic2020 <- subset(dbgpkg95, dbgpkg95$AccidentYear == 
+                    2020 & dbgpkg95$AccidentInvolvingBicycle == TRUE)
+bic2021 <- subset(dbgpkg95, dbgpkg95$AccidentYear == 
+                    2021 & dbgpkg95$AccidentInvolvingBicycle == TRUE)
+
+
+# extract the coordinate
+bic2018m <- st_coordinates(bic2018)
+bic2019m <- st_coordinates(bic2019)
+bic2020m <- st_coordinates(bic2020)
+bic2021m <- st_coordinates(bic2021)
+```
+
+# task 6 Clusters
+
+### dbscan
+
+```{r warning=FALSE}
+# for 2018, and use KNN to find eps
+kNNdistplot(bic2018m, k = 3)
+abline(h = 500, col = "red")
+# however, for realistic meaning, choose the eps manually to 200
+clu2018 <- dbscan(bic2018m, eps = 200, minPts = 3)
+clu2018
+plot(bic2018m, cex = 0.5, asp = 1, col = clu2018$cluster + 1, pch = 19)
+
+# for 2019, and use KNN to find eps
+kNNdistplot(bic2019m, k = 3)
+abline(h = 550, col = "red")
+# for realistic meaning, choose the eps manually to 200
+clu2019 <- dbscan(bic2019m, eps = 200, minPts = 3)
+clu2019
+plot(bic2019m, cex = 0.5, asp = 1, col = clu2019$cluster + 1, pch = 19)
+
+# for 2020, and use KNN to find eps
+kNNdistplot(bic2020m, k = 3)
+abline(h = 600, col = "red")
+# for realistic meaning, choose the eps manually to 200
+clu2020 <- dbscan(bic2020m, eps = 200, minPts = 3)
+clu2020
+plot(bic2020m, cex = 0.5, asp = 1, col = clu2020$cluster + 1, pch = 19)
+
+# for 2021, and use KNN to find eps
+kNNdistplot(bic2021m, k = 3)
+abline(h = 600, col = "red")
+# for realistic meaning, choose the eps manually to 200
+clu2021 <- dbscan(bic2021m, eps = 200, minPts = 3)
+clu2021
+plot(bic2021m, cex = 0.5, asp = 1, col = clu2021$cluster + 1, pch = 19)
+```
+
+# task 7 Other cluster method and Discussion
+
+### Use k-means to cluster for 2018
+
+```{r}
+
+ks <- 2:20
+# Use within sum of squares WSS (look for the knee)
+WSS <- sapply(ks, FUN = function(k) {
+  kmeans(bic2018m, centers = k, nstart = 10)$tot.withinss})
+plot(ks, WSS, type = "l")
+
+# It seems 5 clusters
+km <- kmeans(bic2018m, centers = 5, nstart = 10)
+plot(bic2018m, cex = 0.4, col = km$cluster, asp = 1)
+```
+
+### optics
+
+```{r warning=FALSE}
+#optics
+bic2018m_res <- optics(bic2018m, eps = 2000, minPts = 5)
+bic2018m_res <- extractXi(bic2018m_res, xi = 0.05)
+bic2018m_res
+
+
+
+# visualization
+plot(bic2018m_res)
+hullplot(bic2018m, bic2018m_res, asp = 1)
+
+plot(bic2018m, cex = 0.5, asp = 1, col = bic2018m_res$cluster, pch = 19)
+
+
+# use open street map as basemap 
+bic2018_84 <- st_transform(bic2018, crs = 4326)
+bic2018_84_opt <- mutate(bic2018_84, cluster = bic2018m_res$cluster)
+
+# make palette
+pal1 <- colorFactor(rainbow(20), bic2018_84_opt$cluster, domain = 1:70)
+
+# in order to understand the clusters, use OSM as basemap to visualize
+ss <- leaflet(bic2018_84_opt) %>% 
+  addTiles() %>% 
+  addCircleMarkers( color = ~pal1(cluster), stroke = FALSE, fillOpacity = 0.8, radius = 5)
+
+ss
+```
+
+### Hdbscan
+
+```{r warning=FALSE}
+bic2018_84 <- st_transform(bic2018, crs = 4326)
+bic2018_84m <- st_coordinates(bic2018_84)
+hdb <- hdbscan(bic2018m, minPts = 3)
+hdb
+# add cluster to bic2018
+bic2018_84_hdb <- mutate(bic2018_84, cluster = hdb$cluster)
+
+plot(bic2018m, col = hdb$cluster + 1, pch = 19, asp = 1, cex = 0.5)
+# make palette
+pal1 <- colorFactor(rainbow(20), bic2018_84_hdb$cluster + 1, domain = 1:70)
+
+# in order to understand the clusters, use OSM as basemap to visualize
+ss <- leaflet(bic2018_84_hdb) %>% 
+  addTiles() %>% 
+  addCircleMarkers( color = ~pal1(cluster), stroke = FALSE, fillOpacity = 0.8, radius = 5)
+
+ss
+
+```
+
+# Discussion:
+
+### 1 Comparison between dbscan and K-means
+
+Advantages of dbscan:
+
+(1): It is not necessary to specify the number of clusters K.
+
+(2): K-means clustering is usually only good for classifying data sets with a spherical distribution, whereas DBSCAN clustering can be used for data sets with a variety of complex shapes.
+
+(3): Can identify outliers that do not belong to any cluster, suitable for detecting outliers
+
+Disadvantages of dbscan
+
+(1): The DBSCAN algorithm runs somewhat slower than the KMeans algorithm, especially when dealing with larger datasets.
+
+(2): The minpt and eps parameters also require several attempts, or empirical judgement, to find the most suitable parameter values.
+
+(3): For clusters with different densities, the DBSCAN algorithm may not work very well.
+
+For the dataset in DC1, the dbscan algorithm is more appropriate as we want to obtain clusters formed based on density clustering to study areas where traffic accidents are concentrated and occur intensively, according to the practical implications.
+
+### 2 Discussion about eps in dbscan.
+
+At first, I picked the appropriate eps value for the dbscan based on the KNN distance, for example, in the 2018 bicycle dataset, eps = 500 was chosen, but the eps was too large, resulting in a very large cluster that contained most of the points and did not make practical sense for cluster analysis.
+
+Subsequently, looking at the experience in reality, I thought that if the accidents occurred less than 200m apart, they could be considered as the same cluster, so the value of eps was adjusted to 200 and the final clustering result was obtained.
+
+So in the subsequent data analysis, for the choice of eps in dbscan, it is important to try several times while considering its realistic meaning.
+
+### 3 Discussion about the hdbscan.
+
+After choosing dbscan to cluster the data, there was a problem in that the dbscan algorithm treated the points in the more distant, less dense regions as noisy points. However, accident-prone areas on the outskirts of cities are equally valuable to study, even if they are not as densely concentrated as in the city centre.
+
+We wanted to find higher density families in sparse noisy data, so I tried optics and the hdbscan algorithm again. hdbscan is a good implementation of hierarchical clustering.
+
+The results were discussed and hdbscan did cluster some remote points better, but at the same time split the more dense clusters in the city centre into smaller clusters. If reflected on the open street map base map, hdbscan's clustering can better illustrate that a section of the street is a high traffic accident area.
+
+In the future, a combination of hdbscan and dbscan may be needed to achieve better results for different data analysis purposes.
